@@ -40,6 +40,7 @@ Gin is a web framework written in Go (Golang). It features a martini-like API wi
     - [XML, JSON and YAML rendering](#xml-json-and-yaml-rendering)
     - [JSONP rendering](#jsonp)
     - [Serving static files](#serving-static-files)
+    - [Serving data from reader](#serving-data-from-reader)
     - [HTML rendering](#html-rendering)
     - [Multitemplate](#multitemplate)
     - [Redirects](#redirects)
@@ -52,6 +53,7 @@ Gin is a web framework written in Go (Golang). It features a martini-like API wi
     - [Graceful restart or stop](#graceful-restart-or-stop)
     - [Build a single binary with templates](#build-a-single-binary-with-templates)
     - [Bind form-data request with custom struct](#bind-form-data-request-with-custom-struct)
+    - [Try to bind body into different structs](#try-to-bind-body-into-different-structs)
 - [Testing](#testing)
 - [Users](#users--)
 
@@ -570,6 +572,10 @@ $ curl -v -X POST \
 {"error":"Key: 'Login.Password' Error:Field validation for 'Password' failed on the 'required' tag"}
 ```
 
+**Skip validate**
+
+When running the above example using the above the `curl` command, it returns error. Because the example use `binding:"required"` for `Password`. If use `binding:"-"` for `Password`, then it will not return error when running the above example again.
+
 ### Custom Validators
 
 It is also possible to register custom validators. See the [example code](examples/custom-validation/server.go).
@@ -900,6 +906,32 @@ func main() {
 }
 ```
 
+### Serving data from reader
+
+```go
+func main() {
+	router := gin.Default()
+	router.GET("/someDataFromReader", func(c *gin.Context) {
+		response, err := http.Get("https://raw.githubusercontent.com/gin-gonic/logo/master/color.png")
+		if err != nil || response.StatusCode != http.StatusOK {
+			c.Status(http.StatusServiceUnavailable)
+			return
+		}
+
+		reader := response.Body
+		contentLength := response.ContentLength
+		contentType := response.Header.Get("Content-Type")
+
+		extraHeaders := map[string]string{
+			"Content-Disposition": `attachment; filename="gopher.png"`,
+		}
+
+		c.DataFromReader(http.StatusOK, contentLength, contentType, reader, extraHeaders)
+	})
+	router.Run(":8080")
+}
+```
+
 ### HTML rendering
 
 Using LoadHTMLGlob() or LoadHTMLFiles()
@@ -1054,14 +1086,26 @@ Gin allow by default use only one html.Template. Check [a multitemplate render](
 
 ### Redirects
 
-Issuing a HTTP redirect is easy:
+Issuing a HTTP redirect is easy. Both internal and external locations are supported.
 
 ```go
 r.GET("/test", func(c *gin.Context) {
 	c.Redirect(http.StatusMovedPermanently, "http://www.google.com/")
 })
 ```
-Both internal and external locations are supported.
+
+
+Issuing a Router redirect, use `HandleContext` like below.
+
+``` go
+r.GET("/test", func(c *gin.Context) {
+    c.Request.URL.Path = "/test2"
+    r.HandleContext(c)
+})
+r.GET("/test2", func(c *gin.Context) {
+    c.JSON(200, gin.H{"hello": "world"})
+})
+```
 
 
 ### Custom Middleware
@@ -1553,6 +1597,64 @@ type StructZ struct {
 ```
 
 In a word, only support nested custom struct which have no `form` now.
+
+### Try to bind body into different structs
+
+The normal methods for binding request body consumes `c.Request.Body` and they
+cannot be called multiple times.
+
+```go
+type formA struct {
+  Foo string `json:"foo" xml:"foo" binding:"required"`
+}
+
+type formB struct {
+  Bar string `json:"bar" xml:"bar" binding:"required"`
+}
+
+func SomeHandler(c *gin.Context) {
+  objA := formA{}
+  objB := formB{}
+  // This c.ShouldBind consumes c.Request.Body and it cannot be reused.
+  if errA := c.ShouldBind(&objA); errA == nil {
+    c.String(http.StatusOK, `the body should be formA`)
+  // Always an error is occurred by this because c.Request.Body is EOF now.
+  } else if errB := c.ShouldBind(&objB); errB == nil {
+    c.String(http.StatusOK, `the body should be formB`)
+  } else {
+    ...
+  }
+}
+```
+
+For this, you can use `c.ShouldBindBodyWith`.
+
+```go
+func SomeHandler(c *gin.Context) {
+  objA := formA{}
+  objB := formB{}
+  // This reads c.Request.Body and stores the result into the context.
+  if errA := c.ShouldBindBodyWith(&objA, binding.JSON); errA == nil {
+    c.String(http.StatusOK, `the body should be formA`)
+  // At this time, it reuses body stored in the context.
+  } else if errB := c.ShouldBindBodyWith(&objB, binding.JSON); errB == nil {
+    c.String(http.StatusOK, `the body should be formB JSON`)
+  // And it can accepts other formats
+  } else if errB2 := c.ShouldBindBodyWith(&objB, binding.XML); errB2 == nil {
+    c.String(http.StatusOK, `the body should be formB XML`)
+  } else {
+    ...
+  }
+}
+```
+
+* `c.ShouldBindBodyWith` stores body into the context before binding. This has
+a slight impact to performance, so you should not use this method if you are
+enough to call binding at once.
+* This feature is only needed for some formats -- `JSON`, `XML`, `MsgPack`,
+`ProtoBuf`. For other formats, `Query`, `Form`, `FormPost`, `FormMultipart`,
+can be called by `c.ShouldBind()` multiple times without any damage to
+performance (See [#1341](https://github.com/gin-gonic/gin/pull/1341)).
 
 ## Testing
 
